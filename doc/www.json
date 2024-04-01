@@ -1,6 +1,6 @@
 {
 "project name": "Scan for SyncThing Conflicts",
-"blurb": "Cross-platform Python app to quickly compare conflict files created by SyncThing.",
+"blurb": "Cross-platform Python app to quickly compare conflict files created by SyncThing",
 "hero image": "doc/scan_for_st_conflicts_demo.png",
 "description": "doc/Scan for SyncThing Conflicts.md",
 "starred": 3,
