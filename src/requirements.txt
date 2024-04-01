@@ -1,0 +1,6 @@
+packaging
+#tkinter # install by OS
+sv-ttk  # Sun Valley ttk theme
+tqdm
+show-in-file-manager
+send2trash
