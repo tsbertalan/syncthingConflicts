@@ -1,64 +1,68 @@
-# Scan the given top directory for files like vid_test.sync-conflict-20230723-000249-ONMECE6.py
-# and open Meld.exe with up to three files to compare.
+"""
+Scan the given top directory for files like vid_test.sync-conflict-20230723-000249-ONMECE6.py
+and open Meld.exe with up to three files to compare.
+"""
 
-import os, sys, subprocess, re, threading, queue, time
-import hashlib
-from tqdm.auto import tqdm
+# Python standard library imports
+import os, subprocess, re, threading, queue, time, hashlib
+from collections import deque
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(os.path.join(HERE, '..', 'src', "showinfilemanager", 'src'))
+# Third-party imports
 from showinfm import show_in_file_manager
-
-sys.path.append(os.path.join(HERE, '..', 'src', 'send2trash'))
 import send2trash
-
-
 import tkinter as tk
 from tkinter import ttk
 use_sv = True
 if use_sv:
     import sv_ttk
 
-# HOME = os.path.expanduser("~")
-# SEARCH_DIR = os.path.join(HOME, "Dropbox", 'Projects', 'Journal')
 
-#
+# Constants
+CONFLICT_FILE_REGEX = re.compile(r".*sync-conflict-[0-9A-Z-]*")
+def looks_like_conflictfile(filename: str) -> bool:
+    """
+    Check if a filename looks like a Syncthing conflict file.
 
-# First, scan for all possible such sibships in another process, and start adding them to a list to choose from on the main thread.
+    Parameters:
+    filename (str): The filename to check.
 
-# Sample: vid_test.sync-conflict-20230723-000249-ONMECE6.py
-# Let's just do '*.sync_conflict-[0-9A-Z-]*' for now.
-looks_like_conflictfile_regex = re.compile(r".*sync-conflict-[0-9A-Z-]*")
-def looks_like_conflictfile(p):
-    """Paths look like a conflict file if they have sync-conflict-NNNNNNNN-NNNNNN in them."""
-    return looks_like_conflictfile_regex.match(p) and not (p.startswith('.syncthing') and p.endswith('.tmp'))
+    Returns:
+    bool: True if the filename looks like a Syncthing conflict file, False otherwise.
+    """
+    return CONFLICT_FILE_REGEX.match(filename) and not (filename.startswith('.syncthing') and filename.endswith('.tmp'))
 
-
-from collections import deque
 
 class TicksPerSecondWatcher:
+    """A class to monitor the rate of an event (ticks) per second."""
 
-    def __init__(self):
+    def __init__(self, smoothing_factor=10):
         self.ticks = 0
         self.last_time = time.time()
         self.last_ticks = 0
-        self.scans_per_second = 0
-        self.smoothing_history = deque(maxlen=10)
+        self.ticks_per_second = 0
+        self.smoothing_history = deque(maxlen=smoothing_factor)
 
     def __call__(self):
         self.ticks += 1
         new_time = time.time()
         time_since_last = new_time - self.last_time
+
+        # Avoid division by zero
         if time_since_last == 0:
-            return None
+            return self.ticks_per_second
+
         ticks_since_last = self.ticks - self.last_ticks
         this_tps = float(ticks_since_last) / time_since_last
         self.smoothing_history.append(this_tps)
+
+        # Calculate average ticks per second over the smoothing history
         self.ticks_per_second = sum(self.smoothing_history) / len(self.smoothing_history)
+
         self.last_time = new_time
         self.last_ticks = self.ticks
-        return self.ticks_per_second
 
+        return self.ticks_per_second
+    
 
 def scan_for_conflictfiles(conflicts_queue, status_queue, search_dir):
     """Scan for conflict files in the given directory, and add them to the queue."""
@@ -67,39 +71,48 @@ def scan_for_conflictfiles(conflicts_queue, status_queue, search_dir):
     get_tps = TicksPerSecondWatcher()
     n_scanned = 0
     for j, (root, dirs, files) in enumerate(os.walk(search_dir)):
-        for i, f in enumerate(files):
+        for i, fp in enumerate(files):
             n_scanned += 1
             tps = get_tps()
-            t = time.time()
-            if t - last_report > 1./report_frequency and tps is not None:
-                last_report = t
+            current_time = time.time()
+            if current_time - last_report > 1./report_frequency and tps is not None:
+                last_report = current_time
                 report = dict(tps=tps, n_scanned=n_scanned, n_todo=len(files) - i, root=root)
                 status_queue.put(report)
-            if looks_like_conflictfile(f):
-                conflicts_queue.put(os.path.join(root, f))
+            if looks_like_conflictfile(fp):
+                conflicts_queue.put(os.path.join(root, fp))
     # Send a final status.
     report = dict(tps=0, n_scanned=n_scanned, n_todo=0, root=None)
     status_queue.put(report)
 
-# We'll make a little UI in tkinter to let the user choose which files to compare.
-# It will have a listbox from which to select files, and a button to launch meld with the selected sibship.
 
+def normalize_path(path: str) -> str:
+    """
+    Normalize the given path by removing the ".sync-conflict-NNNNNNNN-NNNNNN-XXXXXXX" part.
 
-def normalize_path(path):
-    # Cut off the "sync-conflict-NNNNNNNN-NNNNNN-XXXXXXX" part.
-    bad_index = path.find(".sync-conflict-")
-    if bad_index == -1:
+    Parameters:
+    path (str): The path to normalize.
+
+    Returns:
+    str: The normalized path.
+    """
+    conflict_indicator = ".sync-conflict-"
+    conflict_length = len(conflict_indicator) + len("NNNNNNNN-NNNNNN-XXXXXXX")
+
+    conflict_index = path.find(conflict_indicator)
+    if conflict_index == -1:
         return path
-    bad_length = len(".sync-conflict-NNNNNNNN-NNNNNN-XXXXXXX")
-    return path[:bad_index] + path[bad_index+bad_length:]
+
+    return path[:conflict_index] + path[conflict_index + conflict_length:]
+
 
 class Sibship:
 
-    def __init__(self, path):
+    def __init__(self, path: str):
         self.paths = [path]
         self.normalized = normalize_path(path)
 
-    def maybe_add(self, path):
+    def maybe_add(self, path: str) -> bool:
         if normalize_path(path) == self.normalized:
             self.paths.append(path)
             if hasattr(self, "callback"):
@@ -107,18 +120,19 @@ class Sibship:
             return True
         return False
     
-    def get_paths_to_compare(self):
+    def get_paths_to_compare(self) -> list[str]:
         out = self.paths
         if self.normalized not in out:
             out = [self.normalized] + out
         return out
     
     @property
-    def n_extant(self):
+    def n_extant(self) -> int:
         return len([p for p in self.get_paths_to_compare() if os.path.exists(p)])
 
 
 class ConflictFileListbox(ttk.Frame):
+
     def __init__(self, searcher, gui_root, conflicts_queue, status_queue):
         super().__init__(gui_root)
         self.searcher = searcher
@@ -472,7 +486,6 @@ class Scanner:
                 break
 
 
-
 def main():
 
     # Ask the user for the SEARCH_DIR using a directory selection dialog.
@@ -482,7 +495,6 @@ def main():
     SEARCH_DIR = os.path.normpath(SEARCH_DIR)
 
     Scanner(SEARCH_DIR)
-
 
 
 if __name__ == "__main__":
